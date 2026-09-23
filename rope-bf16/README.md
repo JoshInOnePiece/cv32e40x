@@ -24,9 +24,23 @@ nothing beyond numpy.
 | M8 | Streaming variant | not started |
 | M9 | Synthesis (area/timing/power) | scripts written, **not run** (no PDK here) |
 
-Measured: **3-cycle datapath latency**, one rotated pair per cycle after fill; 4 cycles
-issue→writeback. Not yet run: the `core-v-verif` baseline regression and RVFI/Spike
-co-simulation — see [`docs/notes.md`](docs/notes.md) §4 for exactly what that leaves open.
+Two optional datapath variants exist alongside the shipping one, both parameterised off
+by default so all three stay independently verifiable:
+
+| Parameter | Effect | Verified |
+|---|---|---|
+| `UsePrefetch` | **2 pipeline stages instead of 3, and zero WB stall.** θ is prefetched one instruction ahead; `m` and `i` become *checks* rather than inputs. Encoding and software unchanged. See [`docs/PREFETCH.md`](docs/PREFETCH.md). | `make m9`, `make m9-core` |
+| `UseFma` | 4 FPU instances instead of 6, and **1.79× lower RMS error**, by fusing one multiply into the add. Deliberately *not* bit-equal to Model A — it rounds twice per output instead of three times. | `make m4-fma` |
+
+Measured, on the integrated core running the M7 C program:
+
+| | stages | issue→result | WB stall cycles | program |
+|---|---|---|---|---|
+| default | 3 | 3 cycles | **200** | 13593 cycles |
+| `UsePrefetch=1` | **2** | **2 cycles** | **0** | **13466 cycles** |
+
+Not yet run: the `core-v-verif` baseline regression and RVFI/Spike co-simulation — see
+[`docs/notes.md`](docs/notes.md) §4 for exactly what that leaves open.
 
 ## Quick start
 
@@ -175,3 +189,21 @@ vendored CVFPU that produce silent wrongness rather than errors:
 It also documents three places where `steps.md`'s own numbers needed correcting (INV-2's
 worked example, `Phi_min`, and the fact that midpoint sampling makes m=0 a *near*-identity
 rather than an identity), and the deliberate deviations from its dependency plan.
+
+### Two bugs that only a latency change could reach
+
+Both had been in the design since Milestone 5 and were invisible because the coprocessor
+was slow enough to hide them. Shortening it made them reachable, and each was caught by an
+existing test rather than by review:
+
+* **`result_is_killed` read a registered flag.** A `commit_kill` arriving in the *same*
+  cycle the result reached the output stage was missed, and the killed instruction wrote
+  `rd`. Latent at a 5-cycle latency, immediate at 3.
+* **The result FIFO gated its *push* on the kill flag.** That only worked because at three
+  stages the commit always arrived before the result was produced. At two it does not, so
+  the gate moved to the FIFO *output*, where commit status is known. This applies to the
+  default configuration too, not just the prefetch path.
+
+The pattern in both is the same: **per-id status consulted as an edge instead of held as a
+level.** If you add state that tracks an in-flight instruction, assume the commit can
+arrive at any time relative to your result — including the same cycle.

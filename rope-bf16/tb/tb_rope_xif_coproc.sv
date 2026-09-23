@@ -17,7 +17,12 @@ module tb_rope_xif_coproc;
   import rope_pkg::*;
 
   localparam int unsigned MaxVectors  = 20_000_000;
-  localparam int unsigned NumPipeRegs = 1;
+  localparam int unsigned NumPipeRegs = 0;
+
+  // Overridable from the command line (-GUsePrefetch=1) so the same testbench proves
+  // that the two-stage prefetch path is semantically identical to the three-stage one.
+  parameter bit UsePrefetch   = 1'b0;
+  parameter bit UseValueCheck = 1'b1;
 
   localparam int unsigned X_NUM_RS    = 2;
   localparam int unsigned X_ID_WIDTH  = 4;
@@ -45,6 +50,8 @@ module tb_rope_xif_coproc;
   ) xif ();
 
   rope_xif_coproc #(
+    .UsePrefetch   ( UsePrefetch   ),
+    .UseValueCheck ( UseValueCheck ),
     .X_NUM_RS    ( X_NUM_RS    ),
     .X_ID_WIDTH  ( X_ID_WIDTH  ),
     .X_MEM_WIDTH ( X_MEM_WIDTH ),
@@ -405,8 +412,12 @@ module tb_rope_xif_coproc;
         // sequentially, so tracking a running counter is sufficient here.
         begin
           logic [3:0] cid;
-          cid = next_id;
+          int unsigned issued_before;
+          cid           = next_id;
+          issued_before = sent;
           for (int unsigned k = 0; k < count; k++) begin
+            // See the note in TEST 5: a commit must follow the issue it refers to.
+            wait (sent > issued_before + k);
             @(posedge clk);
             do_commit(cid, 1'b0);
             cid = cid + 1'b1;
@@ -445,8 +456,14 @@ module tb_rope_xif_coproc;
           end
           begin
             logic [3:0] cid;
-            cid = next_id;
+            int unsigned issued_before;
+            cid           = next_id;
+            issued_before = sent;
             for (int unsigned k = 0; k < count; k++) begin
+              // Commit only once the instruction it refers to has actually been
+              // accepted. A commit that arrives before its issue is not legal XIF, and
+              // would be cleared by `accept` and never repeated.
+              wait (sent > issued_before + k);
               @(posedge clk);
               do_commit(cid, 1'b0);
               cid = cid + 1'b1;
@@ -493,8 +510,14 @@ module tb_rope_xif_coproc;
           end
           begin
             logic [3:0] cid;
-            cid = next_id;
+            int unsigned issued_before;
+            cid           = next_id;
+            issued_before = sent;
             for (int unsigned k = 0; k < count; k++) begin
+              // Commit only once the instruction it refers to has actually been
+              // accepted. A commit that arrives before its issue is not legal XIF, and
+              // would be cleared by `accept` and never repeated.
+              wait (sent > issued_before + k);
               @(posedge clk);
               do_commit(cid, 1'b0);
               cid = cid + 1'b1;

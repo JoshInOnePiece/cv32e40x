@@ -21,6 +21,10 @@
 
 module tb_rope_core;
 
+  // Overridable from the command line: -GUsePrefetch=1
+  parameter bit UsePrefetch   = 1'b0;
+  parameter bit UseValueCheck = 1'b1;
+
   localparam int unsigned MemWords  = 65536;             // 256 KB
   localparam logic [31:0] BootAddr  = 32'h0000_0080;     // matches sw/link.ld
   localparam logic [31:0] PutcharAddr = 32'h1000_0000;
@@ -59,7 +63,10 @@ module tb_rope_core;
   logic        fencei_flush_req;
   logic        core_sleep;
 
-  rope_cv32e40x_wrapper i_dut (
+  rope_cv32e40x_wrapper #(
+    .UsePrefetch   ( UsePrefetch   ),
+    .UseValueCheck ( UseValueCheck )
+  ) i_dut (
     .clk_i               ( clk           ),
     .rst_ni              ( rst_n         ),
     .scan_cg_en_i        ( 1'b0          ),

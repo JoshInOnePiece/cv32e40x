@@ -11,7 +11,7 @@
 // -----------------------------------------------------------------------------
 
 module rope_bf16_add #(
-  parameter int unsigned NumPipeRegs = 1,
+  parameter int unsigned NumPipeRegs = 0,
   parameter logic        Sub         = 1'b0
 ) (
   input  logic        clk_i,
@@ -39,8 +39,9 @@ module rope_bf16_add #(
     .rst_ni,
     // rope_bf16_unit maps these into FPnew's slots 1 and 2, because FPnew's ADD forces
     // operand slot 0 to +1.0. See the operand-mapping comment there.
-    .operand_a_i ( a_i         ),
-    .operand_b_i ( b_i         ),
+    .operand_a_i ( a_i                 ),
+    .operand_b_i ( b_i                 ),
+    .operand_c_i ( rope_pkg::Bf16PosZero ),  // unused: ADD takes slots 1 and 2
     .in_valid_i,
     .in_ready_o,
     .flush_i,

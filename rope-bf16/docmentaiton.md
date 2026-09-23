@@ -598,6 +598,107 @@ result FIFO has a guaranteed free slot. When credits run out it withholds `issue
 the core simply retries later. This makes overflow structurally impossible rather than
 merely unlikely.
 
+## 2.7b Reducing the pipeline from three stages to two
+
+The coprocessor originally took three cycles from issue to result, which cost the CPU a
+one-cycle stall on every rotation. It now takes **two, and stalls zero times**, selected by
+the `UsePrefetch` parameter. The instruction encoding, its operands and all existing
+software are unchanged.
+
+### Why there were three stages
+
+Producing `sin(m·θᵢ)` and `cos(m·θᵢ)` is three steps in series:
+
+```
+  i ──► θ-ROM ──► × m ──► phase ──► sine LUT (×2, parallel) ──► sin, cos
+        6 levels   ~18                    20 levels
+```
+
+(The two ROM depths are measured with `yosys ltp`; the multiply is an estimate.) That is
+roughly 44 levels of logic, and it **cannot begin at the instruction**, because of rule 1
+in the coprocessor's header: CV32E40X sources `issue_req.rs*` from its register-file
+**bypass network**, not from a plain register read —
+
+```systemverilog
+xif_issue_if.issue_req.rs[0] = operand_a_fw;   // forwarding mux output
+```
+
+`operand_*_fw` is one of the latest-arriving signals in the whole ID stage. Hanging 44
+levels off it would make the coprocessor the critical path for the entire CPU. So the
+original design spent a full stage doing nothing but moving operands into flops, purely so
+that the long path could *start* at a flop.
+
+### The idea: the index never has to arrive
+
+`theta_i = base^(-2i/d)` depends only on `i` and on `d`, and `d` is fixed at elaboration.
+So `theta[i]` is a pure ROM lookup — and real code walks `i` in ascending order with `m`
+held constant (`sw/rope_intrin.h`). The coprocessor can therefore read `theta[i+1]` while
+it is still working on pair `i`, keeping it in a register:
+
+```
+stage 1   x_s0, y_s0, sin_s0, cos_s0
+            ├─ x, y    ── straight from rs1 into flops        0 levels   (rule 1 ✓)
+            └─ sin/cos ── m_q × theta_q → LUT                 ~38 levels
+stage 2   result FIFO                                         ~50 levels
+```
+
+Both multiply operands now come from coprocessor flops, so rule 1 still holds, and the ROM
+read for the next pair runs in the background. **The prefetch does not shorten the chain —
+it moves the ROM read a cycle earlier and removes the need to capture the index at all.**
+
+`m` is latched for a different reason: it arrives on the same bypass network, so feeding it
+straight into a multiply would recreate the same problem. Both end up in flops, and both
+therefore become state that can disagree with reality.
+
+### `m` and `i` become checks instead of inputs
+
+The instruction still carries both in `rs2`. They are now compared against the prefetch
+state on every issue. On a mismatch the coprocessor takes **one bubble**, adopts `m` and
+`i` from the instruction, reads `theta[i]` from the ROM directly for that one rotation, and
+resumes prefetching.
+
+Because recovery adopts state *from the instruction*, the first rotation of a new token
+initialises the coprocessor by itself — which is why **no init instruction was added**. One
+would have cost an instruction to save a bubble, roughly break-even, and would have made
+correctness depend on software remembering to issue it.
+
+### Measured
+
+| | stages | issue→result | WB stall cycles | C program |
+|---|---|---|---|---|
+| original | 3 | 3 cycles | **200** | 13593 cycles |
+| `UsePrefetch=1` | **2** | **2 cycles** | **0** | **13466 cycles** |
+
+The 127-cycle saving reconciles exactly: 200 stall cycles removed, 73 resync bubbles added
+for the rotations that do not walk sequentially (`test_rope_rot` uses random `(m,i)`,
+`test_dependent_chain` repeats one `i`). A resync costs one bubble plus two stages — three
+cycles, precisely the old latency — so it neither gains nor loses.
+
+Full detail, including the `commit_kill` hazard, is in `docs/PREFETCH.md`.
+
+## 2.7c Using the FPU as an actual fused multiply-add
+
+CVFPU's ADDMUL group **is** an FMA. The original datapath used it six times with an operand
+tied off each time — four as `MUL` (addend forced to ±0) and two as `ADD` (multiplicand
+forced to +1.0). The `UseFma` parameter uses it properly instead.
+
+The rotation needs two products per output, and an FMA fuses only one, so the other must
+arrive as the addend:
+
+```
+stage 1 (2 multiplies):  p1 = y·sin          p2 = y·cos
+stage 2 (2 FMAs):        x' = x·cos − p1     y' = x·sin + p2
+```
+
+**Four FPU instances instead of six, and the dependency depth is unchanged at two** — so
+this buys area and accuracy, not latency. `x·cos` is now formed to its full 16 significand
+bits inside the FMA and never rounded on its own, giving **two roundings per output instead
+of three** and **1.79× lower RMS error** against an FP64 reference.
+
+That makes it deliberately *not* bit-equal to Model A, so it has its own reference model
+(`rope_fma_bf16`, Model A') and its own test target, `make m4-fma`. Both variants pass
+201,961 vectors with zero errors against their respective models.
+
 ## 2.8 Module-by-module walkthrough
 
 | Module | Lines | What it does |
@@ -1213,6 +1314,130 @@ be the exact identity. It is not, and cannot be, because of midpoint sampling (P
 The test was replaced with one asserting the property that actually holds — that the error
 is fully explained by `|y| * sin(0)` plus one rounding — and the behaviour was documented
 rather than papered over.
+
+## 4.12 A killed instruction wrote back — twice, for two different reasons
+
+CORE-V-XIF lets the core **kill an instruction it has already accepted**, on any interrupt,
+exception, debug entry, fence, `dret` or CSR-induced flush. The coprocessor must then
+retire it silently, because the core has discarded it and writing `rd` would corrupt
+architectural state.
+
+That worked for a year of development and then failed twice, both times only when the
+pipeline got shorter.
+
+**First failure — a registered flag read one cycle too late.**
+
+```systemverilog
+assign result_is_killed = killed_q[cur_tag.id];   // registered: previous cycles only
+```
+
+`killed_q` is set by `commit_kill`, so it reflects kills from *earlier* cycles. At a
+five-cycle latency the kill always landed first. At three, the kill and the result coincide
+— and the register has not updated yet, so the killed instruction writes `rd`. Fixed by
+ORing in a combinational same-cycle term, which is safe because `commit_valid` has no ready
+signal and may be sampled directly:
+
+```systemverilog
+assign same_cycle_kill  = commit_valid & commit_kill & (commit.id == cur_tag.id);
+assign result_is_killed = killed_q[cur_tag.id] | same_cycle_kill;
+```
+
+**Second failure — the gate was on the wrong side of the FIFO.** The result FIFO gated its
+*push*, which only worked because at three stages the commit always arrived before the
+result was produced. At two stages the result wins the race, reaches the FIFO, and a kill
+arriving afterwards is simply ignored. The fix moves the gate to the FIFO **output**, where
+the commit status is known:
+
+```systemverilog
+assign result_valid = ~fifo_empty & head_committed & ~head_killed;
+```
+
+plus a silent drain so a killed entry does not block the head forever. This is correct at
+**any** latency rather than relying on commit ordering, and it costs nothing: CV32E40X
+signals commit from the EX stage, one cycle after issue, while the earliest possible result
+is also one cycle after issue. **It applies to the default configuration too**, not only to
+the prefetch path.
+
+Both failures are the same mistake in different places: **per-instruction status consulted
+as an edge instead of held as a level.**
+
+## 4.13 A credit leak created by the fix for 4.12
+
+Gating the FIFO output created a second retirement path. An instruction can now leave
+either by being written back (or silently drained) at the FIFO head, or by being killed
+before its result was ever pushed — and those can happen in the same cycle for *different*
+instructions. The existing accounting ORed them:
+
+```systemverilog
+credit_q <= credit_q + accept - (fifo_pop | retire_killed);   // loses a credit
+```
+
+Every coincidence loses one credit permanently, and since credit is what gates
+`issue_ready`, the coprocessor would slowly stop accepting work. Now summed:
+
+```systemverilog
+credit_q <= credit_q + accept - fifo_pop - retire_killed;
+```
+
+This is the characteristic risk of a bug fix: it was correct in isolation and wrong in
+combination with the accounting around it.
+
+## 4.14 The prefetch is speculative state, and an interrupt corrupts it
+
+The prefetch advances on `accept`, but an accepted instruction can still be killed. Nothing
+in the arithmetic notices:
+
+```
+ROPE.ROT  pair 2   ◄── timer interrupt: accepted, then KILLED
+                       theta_q → θ₃,  i_q → 3        ← state ran ahead
+   ... handler runs, returns ...
+ROPE.ROT  pair 2 (re-executed)    uses θ₃  ✗ WRONG
+```
+
+Every remaining pair of that head vector is silently rotated by the wrong frequency. No
+assertion fires, no exception is raised, the results are still finite unit-magnitude
+numbers, and whether it happens depends on interrupt timing — so a test can pass a thousand
+times and fail in the field.
+
+Two independent checks now catch it: a kill on the commit channel sets a desync flag, and
+the instruction's own `(m, i)` are compared against the prefetch state on every issue.
+Either triggers a one-cycle resync.
+
+**Which check mattered was settled by measurement, and reasoning had it backwards.**
+Building with the value check compiled out (`make m9-tier1`) fails **6039 of 6066**
+vectors, because the M5 stimulus is random `(m, i)` rather than a sequential walk. The
+value check is required for architectural correctness — without it `ROPE.ROT` stops being a
+pure function of its operands. And since a killed instruction re-executes with an index
+that no longer matches, the value check catches the kill case unaided; the kill-triggered
+check is the redundant one. That configuration is kept as a deliberately-failing target, so
+the safety mechanism is *proven* load-bearing rather than assumed to be.
+
+## 4.15 A testbench that committed instructions before issuing them
+
+With results now held until commit, the M5 suite deadlocked at eight pending — exactly the
+result-FIFO depth. The commit threads walked a free-running counter:
+
+```systemverilog
+cid = next_id;
+for (int unsigned k = 0; k < count; k++) begin
+  @(posedge clk);
+  do_commit(cid, 1'b0);     // races ahead whenever issue is throttled
+  cid = cid + 1'b1;
+end
+```
+
+Whenever result-FIFO credit throttled the issue thread, the commit thread ran ahead and
+committed ids that had not been issued yet. `accept` clears the commit flag for a reused
+id, so those commits were discarded and the instructions could never retire.
+
+Committing an id before it is issued is not valid CORE-V-XIF — the testbench had simply
+been getting away with it, because the old design never required a commit to release a
+result. The threads now wait on the issue count.
+
+This is worth recording as a category: **a design change can expose a latent bug in the
+testbench, and the testbench is not automatically the correct party.** The instinct to
+"fix the test so it passes" would have been right here and wrong in 4.12, and the only way
+to tell them apart was to work out which behaviour the protocol actually mandates.
 
 ---
 ---

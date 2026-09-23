@@ -6,7 +6,7 @@
 // -----------------------------------------------------------------------------
 
 module rope_bf16_mul #(
-  parameter int unsigned NumPipeRegs = 1
+  parameter int unsigned NumPipeRegs = 0
 ) (
   input  logic        clk_i,
   input  logic        rst_ni,
@@ -31,8 +31,9 @@ module rope_bf16_mul #(
   ) i_unit (
     .clk_i,
     .rst_ni,
-    .operand_a_i ( a_i         ),
-    .operand_b_i ( b_i         ),
+    .operand_a_i ( a_i                 ),
+    .operand_b_i ( b_i                 ),
+    .operand_c_i ( rope_pkg::Bf16PosZero ),  // FPnew forces slot 2 to +/-0 for MUL
     .in_valid_i,
     .in_ready_o,
     .flush_i,

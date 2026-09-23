@@ -57,6 +57,7 @@ ROPE_SRC := \
   $(ROOT)/rtl/rope_bf16_unit.sv \
   $(ROOT)/rtl/rope_bf16_mul.sv \
   $(ROOT)/rtl/rope_bf16_add.sv \
+  $(ROOT)/rtl/rope_bf16_fma.sv \
   $(ROOT)/rtl/rope_datapath.sv
 
 XIF_SRC := \
@@ -128,6 +129,7 @@ $(ROOT)/rtl/rope_sin_rom.sv: $(ROOT)/gen/gen_sin_lut.py $(ROOT)/model/bf16.py
 model:
 	cd $(ROOT)/model && $(PYTHON) test_bf16.py
 	cd $(ROOT)/model && $(PYTHON) test_rope_ref.py
+	cd $(ROOT)/model && $(PYTHON) test_bf16_fma.py
 
 characterize:
 	cd $(ROOT) && $(PYTHON) model/characterize.py --out docs/error_budget.md
@@ -183,6 +185,7 @@ VEC_BF16     := $(BUILD)/vectors_bf16_$(NVEC).hex
 VEC_PHASE    := $(BUILD)/vectors_phase_$(NVEC).hex
 VEC_LUT      := $(BUILD)/vectors_lut_$(NVEC).hex
 VEC_DATAPATH := $(BUILD)/vectors_datapath_$(NVEC).hex
+VEC_DATAPATH_FMA := $(BUILD)/vectors_datapath_fma_$(NVEC).hex
 VEC_XIF      := $(BUILD)/vectors_xif_$(NVEC).hex
 
 # --- M1: BF16 primitives -----------------------------------------------------
@@ -192,7 +195,7 @@ $(VEC_BF16): $(ROOT)/model/gen_vectors.py $(ROOT)/model/bf16.py | dirs
 m1: gen $(VEC_BF16)
 	cd $(BUILD) && $(VLT_SIM) --Mdir obj_m1 -o sim_m1 \
 	  $(CC_SRC) $(FPNEW_SRC) $(ROOT)/rtl/rope_pkg.sv \
-	  $(ROOT)/rtl/rope_bf16_unit.sv $(ROOT)/rtl/rope_bf16_mul.sv $(ROOT)/rtl/rope_bf16_add.sv \
+	  $(ROOT)/rtl/rope_bf16_unit.sv $(ROOT)/rtl/rope_bf16_mul.sv $(ROOT)/rtl/rope_bf16_add.sv $(ROOT)/rtl/rope_bf16_fma.sv \
 	  $(ROOT)/tb/tb_rope_bf16_unit.sv --top-module tb_rope_bf16_unit
 	cd $(BUILD) && ./obj_m1/sim_m1 +vectors=$(notdir $(VEC_BF16))
 
@@ -229,6 +232,52 @@ m4: gen $(VEC_DATAPATH)
 	  $(CC_SRC) $(FPNEW_SRC) $(ROPE_SRC) \
 	  $(ROOT)/tb/tb_rope_datapath.sv --top-module tb_rope_datapath
 	cd $(BUILD) && ./obj_m4/sim_m4 +vectors=$(notdir $(VEC_DATAPATH))
+
+# The fused-multiply-add datapath variant (rope_datapath UseFma=1): two multipliers and
+# two FMAs instead of four multipliers and two adders. It is deliberately NOT bit-equal
+# to Model A -- one fewer rounding per output -- so it is checked against Model A'
+# (model/rope_ref.py:rope_fma_bf16), with its own vector file.
+$(VEC_DATAPATH_FMA): $(ROOT)/model/gen_vectors.py $(ROOT)/model/rope_ref.py \
+                     $(ROOT)/model/bf16_fma.py | dirs
+	cd $(ROOT)/model && $(PYTHON) gen_vectors.py datapath --fma --n $(NVEC) --out $@
+
+# The two-stage theta-prefetch path (rope_xif_coproc UsePrefetch=1). Semantics are
+# IDENTICAL to the three-stage path -- same instruction, same encoding, same operands --
+# so this runs the very same M5 testbench and vectors. A difference here is a bug, not a
+# new reference. See tb/VERIFICATION.md for the architecture and the commit_kill hazard.
+# The same bare-metal C program as m7, on the integrated core, with the two-stage
+# prefetch path enabled. Semantics are unchanged, so this must produce exit_code=0 and
+# the same RESULT: PASS -- what changes is the cycle count. See docs/PREFETCH.md.
+m9-core: gen sw | dirs
+	cd $(BUILD) && $(VLT_SIM) -Wno-IMPLICIT -Wno-COMBDLY \
+	  -I$(CV32E40X)/rtl -I$(CV32E40X)/rtl/include -I$(CV32E40X)/bhv \
+	  --Mdir obj_m9core -o sim_m9core -GUsePrefetch=1 -GUseValueCheck=1 \
+	  $(CORE_SRC) $(CC_SRC) $(FPNEW_SRC) $(ROPE_SRC) $(XIF_SRC) $(CORE_RTL) \
+	  $(ROOT)/rtl/rope_cv32e40x_wrapper.sv \
+	  $(ROOT)/tb/tb_rope_core.sv --top-module tb_rope_core
+	cd $(BUILD) && ./obj_m9core/sim_m9core +hex=$(ROOT)/sw/test_rope.hex
+
+m9: gen $(VEC_XIF)
+	cd $(BUILD) && $(VLT_SIM) --Mdir obj_m9 -o sim_m9 \
+	  -GUsePrefetch=1 -GUseValueCheck=1 \
+	  $(CC_SRC) $(FPNEW_SRC) $(ROPE_SRC) $(XIF_SRC) \
+	  $(ROOT)/tb/tb_rope_xif_coproc.sv --top-module tb_rope_xif_coproc
+	cd $(BUILD) && ./obj_m9/sim_m9 +vectors=$(notdir $(VEC_XIF))
+
+# Same, with the value check compiled out -- Tier 1 (kill detection) only. Used to show
+# that each tier is independently load-bearing.
+m9-tier1: gen $(VEC_XIF)
+	cd $(BUILD) && $(VLT_SIM) --Mdir obj_m9t1 -o sim_m9t1 \
+	  -GUsePrefetch=1 -GUseValueCheck=0 \
+	  $(CC_SRC) $(FPNEW_SRC) $(ROPE_SRC) $(XIF_SRC) \
+	  $(ROOT)/tb/tb_rope_xif_coproc.sv --top-module tb_rope_xif_coproc
+	cd $(BUILD) && ./obj_m9t1/sim_m9t1 +vectors=$(notdir $(VEC_XIF))
+
+m4-fma: gen $(VEC_DATAPATH_FMA)
+	cd $(BUILD) && $(VLT_SIM) --Mdir obj_m4fma -o sim_m4fma -GUseFma=1 \
+	  $(CC_SRC) $(FPNEW_SRC) $(ROPE_SRC) \
+	  $(ROOT)/tb/tb_rope_datapath.sv --top-module tb_rope_datapath
+	cd $(BUILD) && ./obj_m4fma/sim_m4fma +vectors=$(notdir $(VEC_DATAPATH_FMA))
 
 m4-full:
 	$(MAKE) m4 NVEC=10000000

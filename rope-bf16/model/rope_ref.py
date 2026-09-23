@@ -23,6 +23,7 @@ wrong makes a convention mismatch look like a numerical bug:
 
 import numpy as np
 
+from bf16_fma import bf16_fma
 from bf16 import (
     bf16_add,
     bf16_mul,
@@ -152,6 +153,40 @@ def rope_strict_bf16(x, y, m, i, phi, flush_subnormals=False):
     p3 = bf16_mul(yb, c, **kw)  # y*cos
 
     return bf16_sub(p0, p1, **kw), bf16_add(p2, p3, **kw)
+
+
+# ---------------------------------------------------------------------------
+# MODEL A': BF16 I/O, one fused multiply-add per output (rope_datapath UseFma=1)
+# ---------------------------------------------------------------------------
+
+
+def rope_fma_bf16(x, y, m, i, phi):
+    """Rotate one BF16 pair using two multipliers and two FMAs.
+
+        p1 = round(y*sin)          p2 = round(y*cos)
+        x' = round(x*cos - p1)     y' = round(x*sin + p2)
+
+    The x* products are formed inside the FMAs to their full 2p bits and aligned
+    against the addend in the internal accumulator, so they are never rounded on their
+    own: TWO roundings per output instead of Model A's three, and four FPU instances
+    instead of six.
+
+    This is what the RTL computes with UseFma=1. It is deliberately NOT equal to
+    rope_strict_bf16 -- it is closer to rope_exact.
+    """
+    ph = phase_of(m, i, phi)
+    c = lut_cos(ph)
+    s = lut_sin(ph)
+
+    xb = np.asarray(x, dtype=np.uint16)
+    yb = np.asarray(y, dtype=np.uint16)
+
+    p1 = bf16_mul(yb, s)   # y*sin -- rounded, it is a standalone multiplier result
+    p2 = bf16_mul(yb, c)   # y*cos -- likewise
+
+    xo = bf16_fma(xb, c, p1, sub=True)    # x*cos - p1, one rounding
+    yo = bf16_fma(xb, s, p2, sub=False)   # x*sin + p2, one rounding
+    return xo, yo
 
 
 # ---------------------------------------------------------------------------

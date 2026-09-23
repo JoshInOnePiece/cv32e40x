@@ -46,11 +46,29 @@ step of a transformer, built entirely in BF16, driven by a new custom RISC-V ins
   case. Answer: **1.27× RMS error**, and only ~3.5 of 8 significand bits survive the
   cancellation that high-frequency pairs hit within the first few hundred tokens.
 
-- **Found and fixed 10 defects**, most of the silent-wrong-answer kind — including two
-  traps in the third-party FPU and a position-field truncation that would have corrupted
-  results past token 8191 with no error reported.
+- **Halved the pipeline stall: 3 stages → 2, and 200 stall cycles → 0.** The rotation
+  frequency `theta[i]` depends only on the pair index, and real code walks that index
+  0,1,2,… — so the coprocessor now fetches the *next* one while computing the current
+  pair, and the pipeline stage that existed only to capture the index disappears.
+  **Instruction encoding, operands and all existing software unchanged.**
 
-- **Self-contained and reproducible** — 49 new files, zero upstream files modified,
+- **Cut the floating-point unit count 6 → 4 while *improving* accuracy 1.79×.** CVFPU's
+  add and multiply are the same fused multiply-add block with one operand tied off; using
+  it as an actual FMA fuses one product into the addition, which removes both a rounding
+  step and two hardware instances.
+
+- **Found and fixed 14 defects**, most of the silent-wrong-answer kind — including two
+  traps in the third-party FPU and a position-field truncation that would have corrupted
+  results past token 8191 with no error reported. Four of the newest share one shape:
+  **speculative per-instruction state read as an edge instead of held as a level**, each
+  unreachable until the pipeline got shorter and the result started beating the commit.
+
+- **Kept a test that is designed to fail.** `make m9-tier1` builds the prefetch with its
+  safety check compiled out and fails 6039 of 6066 vectors — proof the check is
+  load-bearing rather than decorative. Reasoning alone had it backwards; the measurement
+  corrected it.
+
+- **Self-contained and reproducible** — 53 new files, zero upstream files modified,
   one `make` command runs every check.
 
 ## Upcoming
@@ -126,6 +144,24 @@ Verified from the compiled binary:  0x0117878b
 > already completed (also zero mismatches). To make the recording match the left column
 > exactly, run `make demo NVEC=1000000` — it takes a few minutes because it regenerates
 > the vector files.
+
+## Pipeline reduction (measured on the integrated core)
+
+| | stages | issue→result | WB stall cycles | C program |
+|---|---|---|---|---|
+| original | 3 | 3 cycles | **200** | 13593 cycles |
+| θ prefetch | **2** | **2 cycles** | **0** | **13466 cycles** |
+
+Zero stall, measured over 200 rotations — not inferred. The 127-cycle saving reconciles
+exactly: 200 stalls removed, 73 resync bubbles added for the rotations that do not walk
+sequentially, and a resync costs precisely the old latency, so it neither gains nor loses.
+
+The hazard this had to survive: CORE-V-XIF lets the core **kill an instruction it already
+accepted** — on any interrupt, exception, debug entry or pipeline flush. The prefetch has
+by then advanced, so every remaining pair of the head vector would be silently rotated by
+the wrong frequency. No assertion fires, no exception, results still look plausible, and
+it depends on interrupt timing. Two independent checks catch it, and recovery costs one
+cycle.
 
 ## Performance and size
 

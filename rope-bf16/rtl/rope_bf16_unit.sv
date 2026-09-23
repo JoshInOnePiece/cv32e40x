@@ -20,7 +20,7 @@
 module rope_bf16_unit #(
   // Number of pipeline registers inside the FPnew unit. 1 is a reasonable default;
   // raise it if timing closure needs more stages.
-  parameter int unsigned NumPipeRegs = 1,
+  parameter int unsigned NumPipeRegs = 0,
   // Which ADDMUL operation this instance performs.
   parameter fpnew_pkg::operation_e Op = fpnew_pkg::MUL,
   // op_mod inverts the sign of operand C, turning ADD into SUB.
@@ -33,6 +33,10 @@ module rope_bf16_unit #(
   // comment at `operands` below, which is where the FPnew ADD/MUL asymmetry is handled.
   input  logic [15:0] operand_a_i,
   input  logic [15:0] operand_b_i,
+  // Third operand, used only when Op is FMADD. MUL and ADD tie this off: FPnew
+  // overwrites slot 2 for MUL (forced to +/-0) and slot 0 for ADD (forced to +1.0),
+  // so a value passed here in those modes would be silently discarded.
+  input  logic [15:0] operand_c_i,
 
   input  logic        in_valid_i,
   output logic        in_ready_o,
@@ -97,6 +101,14 @@ module rope_bf16_unit #(
       operands[0] = rope_pkg::Bf16One;  // ignored by fpnew_fma (forced to +1.0)
       operands[1] = operand_a_i;
       operands[2] = operand_b_i;
+    end else if (Op == fpnew_pkg::FMADD) begin
+      // FMADD is the one case FPnew does NOT rewrite ("FMADD: do nothing"), so the
+      // natural mapping applies: a*b + c, with OpMod=1 inverting operand_c's sign to
+      // give a*b - c. The product is formed to its full 2p bits and the addend is
+      // aligned against it internally -- ONE rounding for the whole operation.
+      operands[0] = operand_a_i;
+      operands[1] = operand_b_i;
+      operands[2] = operand_c_i;
     end else begin  // MUL (and any other ADDMUL op using slots 0/1)
       operands[0] = operand_a_i;
       operands[1] = operand_b_i;

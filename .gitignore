@@ -1,3 +1,44 @@
 TAGS
 *.swp
 *~
+
+# ---------------------------------------------------------------------------
+# Bazel / OpenROAD (ORFS) synthesis flow
+#
+# None of this belongs in the repository. The bazel-* entries are convenience
+# SYMLINKS that Bazel recreates on every invocation; they point into a per-user
+# cache (~/.cache/bazel/_bazel_<user>/<workspace-hash>/...), so they are both
+# machine-specific and dangling for anyone else. Four of them had been committed
+# by accident and were removed with `git rm --cached`.
+#
+# The flow definition itself (BUILD, MODULE.bazel, orfs/) is deliberately kept
+# outside version control too: it depends on a sibling bazel-orfs checkout and a
+# 19 GB build cache, and the RTL is verified without it.
+# ---------------------------------------------------------------------------
+
+# Bazel's convenience symlinks into the output base
+/bazel-*
+
+# Bazel workspace and configuration
+/BUILD
+/BUILD.bazel
+/WORKSPACE
+/WORKSPACE.bazel
+/MODULE.bazel
+/MODULE.bazel.lock
+/.bazelrc
+/.bazelversion
+/.bazelignore
+/user.bazelrc
+
+# The ORFS flow definition and its patches
+/orfs/
+
+# `bazel run //orfs:<target>` copies runfiles here via deploy.tpl
+/tmp/orfs/
+
+# OpenROAD / Yosys outputs if a flow is ever run in-tree
+/results/
+/logs/
+/reports/
+/objects/

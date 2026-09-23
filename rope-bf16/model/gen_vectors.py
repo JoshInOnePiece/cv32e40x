@@ -26,6 +26,7 @@ from rope_ref import (
     lut_sin,
     phase_of,
     phi_table,
+    rope_fma_bf16,
     rope_strict_bf16,
 )
 
@@ -203,7 +204,7 @@ def gen_lut(n, seed, f):
     return count
 
 
-def gen_datapath(n, seed, f, d=128, base=DEFAULT_BASE):
+def gen_datapath(n, seed, f, d=128, base=DEFAULT_BASE, fma=False):
     """Full datapath vectors vs Model A, including the cancellation corner."""
     phi = phi_table(d, base)
     half = d // 2
@@ -266,7 +267,8 @@ def gen_datapath(n, seed, f, d=128, base=DEFAULT_BASE):
     m = np.array(ms, dtype=np.uint64)
     i = np.array(ids, dtype=np.int64)
 
-    xr_, yr_ = rope_strict_bf16(x, y, m, i, phi)
+    xr_, yr_ = (rope_fma_bf16(x, y, m, i, phi) if fma
+               else rope_strict_bf16(x, y, m, i, phi))
     for k in range(len(x)):
         f.write(
             f"{int(x[k]):04x} {int(y[k]):04x} {int(m[k]):04x} {int(i[k]):02x} "
@@ -304,6 +306,8 @@ def main():
     ap.add_argument("kind", choices=["bf16", "phase", "lut", "datapath", "xif"])
     ap.add_argument("--n", type=int, default=100_000, help="number of random vectors")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--fma", action="store_true",
+                    help="datapath vectors for the UseFma=1 variant (Model A')")
     ap.add_argument("--d", type=int, default=128)
     ap.add_argument("--base", type=float, default=DEFAULT_BASE)
     ap.add_argument("--out", required=True)
@@ -317,7 +321,7 @@ def main():
         elif args.kind == "lut":
             n = gen_lut(args.n, args.seed, f)
         elif args.kind == "datapath":
-            n = gen_datapath(args.n, args.seed, f, args.d, args.base)
+            n = gen_datapath(args.n, args.seed, f, args.d, args.base, args.fma)
         else:
             n = gen_xif(args.n, args.seed, f, args.d, args.base)
 

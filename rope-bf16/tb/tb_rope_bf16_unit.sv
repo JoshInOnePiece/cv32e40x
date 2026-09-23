@@ -13,7 +13,7 @@
 
 module tb_rope_bf16_unit;
 
-  localparam int unsigned NumPipeRegs = 1;
+  localparam int unsigned NumPipeRegs = 0;
   localparam int unsigned MaxVectors  = 20_000_000;
 
   logic clk, rst_n;

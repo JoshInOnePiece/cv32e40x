@@ -25,7 +25,13 @@ module rope_cv32e40x_wrapper
   parameter m_ext_e        M_EXT            = M,
   parameter bit            DEBUG            = 1,
   parameter int unsigned   NUM_MHPMCOUNTERS = 1,
-  parameter int unsigned   NumPipeRegs      = 1
+  parameter int unsigned   NumPipeRegs      = 0,
+  // Two-stage theta prefetch. See docs/PREFETCH.md.
+  parameter bit            UsePrefetch      = 1'b0,
+  // REQUIRED whenever UsePrefetch is set: without it ROPE.ROT is no longer a pure
+  // function of its operands, because the prefetched theta is only correct for a
+  // sequential walk of i. Disabling it is a negative test, not a configuration.
+  parameter bit            UseValueCheck    = 1'b1
 ) (
   input  logic        clk_i,
   input  logic        rst_ni,
@@ -218,7 +224,9 @@ module rope_cv32e40x_wrapper
     .X_MEM_WIDTH ( X_MEM_WIDTH ),
     .X_RFR_WIDTH ( X_RFR_WIDTH ),
     .X_RFW_WIDTH ( X_RFW_WIDTH ),
-    .NumPipeRegs ( NumPipeRegs )
+    .NumPipeRegs   ( NumPipeRegs   ),
+    .UsePrefetch   ( UsePrefetch   ),
+    .UseValueCheck ( UseValueCheck )
   ) i_rope (
     .clk_i,
     .rst_ni,

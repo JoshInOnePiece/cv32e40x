@@ -17,7 +17,12 @@ module tb_rope_datapath;
   import rope_pkg::*;
 
   localparam int unsigned MaxVectors  = 20_000_000;
-  localparam int unsigned NumPipeRegs = 1;
+  localparam int unsigned NumPipeRegs = 0;
+
+  // Which datapath variant to build. Selected at ELABORATION time, so it is a plusarg
+  // read into a parameter rather than a runtime signal: +usefma=1 builds the 2-mul +
+  // 2-FMA datapath (Model A'), anything else builds 4-mul + 2-add (Model A).
+  parameter bit UseFma = 1'b0;
 
   logic clk, rst_n;
 
@@ -62,6 +67,7 @@ module tb_rope_datapath;
 
   rope_datapath #(
     .NumPipeRegs ( NumPipeRegs ),
+    .UseFma      ( UseFma      ),
     .RegLut      ( 1'b1        )
   ) i_dut (
     .clk_i       ( clk       ),
@@ -177,7 +183,9 @@ module tb_rope_datapath;
       $display("FAIL: %0d mismatches vs Model A (steps.md requires ZERO)", errors);
       $fatal(1);
     end
-    $display("PASS: datapath bit-exact vs Model A on all %0d vectors", checked);
+    $display("PASS: datapath bit-exact vs %0s on all %0d vectors",
+             UseFma ? "Model A' (fused multiply-add)" : "Model A (strict BF16)",
+             checked);
     $finish;
   end
 
